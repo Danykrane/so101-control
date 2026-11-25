@@ -1,0 +1,6 @@
+# Ставится в .venv поверх conda lerobot (--system-site-packages): lerobot, rustypot, numpy, opencv берутся оттуда.
+# Не ставить opencv-python: конфликт Qt-плагинов с opencv-python-headless из lerobot.
+PyQt6>=6.7
+pyqtgraph>=0.13
+PyOpenGL>=3.1
+pytest>=8
