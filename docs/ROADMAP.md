@@ -1,69 +1,48 @@
-# SO-101 Studio: план разработки
+# Roadmap
 
-Цель: десктоп-приложение на C++/Qt в стиле Traxium для управления SO-101 и запуска обученных
-действий. Основная задача: взять синий куб со стола и положить в руку.
+Goal: a desktop application (C++ / Qt 6) to operate the SO-101 and run learned skills safely.
+Reference task: pick a blue cube from the table and hand it to a person.
 
-## Целевой поток экранов
+## Target architecture
 
-1. Стартовый экран.
-2. Выбор робота и модели (SO-101 follower, позже SO-100 и другие).
-3. Загрузчик: поиск порта, ping 6 моторов, чтение калибровки из EEPROM, напряжение и
-   температура, камеры, ping GPU-сервера.
-4. Рабочее окно: в центре 3D-двойник (шарниры точками, звенья линиями, сетка), снизу две
-   камеры и лог, справа конструктор пайплайна.
-5. Действие: имя → чат с инструкцией → выбор модели, политики и данных → «Выполнить».
-   3D-вид и симуляция синхронно отражают робота во время выполнения.
-
-## Архитектура
-
-| Компонент | Сейчас | Потом |
+| Component | Now | Next |
 |---|---|---|
-| UI | PyQt6-прототип | C++/Qt 6.11 (скелет Traxium: CMake-пресеты, плагины, темы) |
-| Robot runtime | модуль в процессе UI | отдельный процесс `robotd` (Python, LeRobot) |
-| Кинематика | numpy FK/IK по URDF | та же логика в C++ (или KDL/Pinocchio) |
-| Симуляция | нет | MuJoCo: режимы mirror и preview |
-| Политики | нет | GPU-сервер: ACT, SmolVLA, Diffusion, TiPToP + cuTAMP |
+| UI | PyQt6 prototype | C++ / Qt 6 app: Qt Quick 3D digital twin, task pipeline editor, chat-driven actions |
+| Robot runtime | `robotd` (Python, HTTP) | `robotd` with ZeroMQ or gRPC; ROS 2 `ros2_control` hardware interface in C++ |
+| Kinematics | numpy FK/IK from URDF | same algorithms in C++ (or KDL / Pinocchio), MoveIt 2 for planning |
+| Simulation | first-order servo model | MuJoCo twin: mirror (real to sim) and preview (sim to real after confirmation) |
+| Policies | none | GPU policy server: ACT, SmolVLA, Diffusion Policy via LeRobot async inference |
 
-Каналы между процессами (этап 5):
+Inter-process channels:
 
-| Канал | Частота | Содержимое |
+| Channel | Rate | Content |
 |---|---|---|
-| `state` (PUB/SUB) | 30–50 Гц | `t, q[6], q_goal[6], load[6], temp[6], torque_on` |
-| `command` (REQ/REP) | по событию | jog, goto, gripper, hold, torque on/off; всегда через safety-фильтр |
-| `video` | 30 Гц | кадры двух камер (shared memory или JPEG) |
-| `policy` (gRPC) | 10–30 Гц | observation → action chunk (LeRobot async inference) |
+| `state` (PUB/SUB) | 30-50 Hz | `t, q[6], q_goal[6], load[6], temp[6], torque_on` |
+| `command` (REQ/REP) | on event | jog, goto, gripper, hold, torque on/off; always through the safety filter |
+| `video` | 30 Hz | frames from two cameras (shared memory or JPEG) |
+| `policy` (gRPC) | 10-30 Hz | observation to action chunk |
 
-Safety-фильтр стоит перед драйвером для любого источника команд: лимиты URDF и калибровки,
-ограничение шага за тик, ограничение скорости, проверка самопересечений по сферам из
-`so101-tiptop/model/robot.json`, watchdog на потерю связи.
+The safety filter sits in front of the driver for every command source: URDF and calibration limits, per-tick step
+limit, speed limit, self-collision check with sphere models, watchdog on link loss.
 
-## Этапы
+## Stages
 
-| # | Этап | Результат | Готово, когда |
-|---|---|---|---|
-| 0 | PyQt-прототип ручного управления | кнопки суставов, декартов jog через IK, гриппер, 2 камеры, 3D-скелет, диагностика, sim-режим | работает без робота; с роботом: ping 6 моторов и плавное движение по кнопке |
-| 1 | Привязка модели к железу | знак и ноль каждого сустава (`follower.ini`), калибровка камер, положение front-камеры относительно базы | 3D-скелет совпадает с роботом на 5 позах в пределах 3° |
-| 2 | Цифровой двойник MuJoCo | MJCF SO-101, стол, синий куб; mirror (real → sim) и preview (sim → real после подтверждения) | задержка отражения меньше 50 мс |
-| 3 | Данные | запись эпизодов LeRobotDataset (2 камеры, состояние, действие) с телеуправления | 50+ эпизодов «синий куб в руку», replay воспроизводит их |
-| 4 | Политики | обучение ACT и SmolVLA на сервере, policy server, проверка предиката V по камере | измеренная успешность на 20 попытках |
-| 5 | Runtime как сервис | `robotd` с протоколом ZeroMQ или gRPC; PyQt UI становится клиентом | UI перезапускается без переподключения робота |
-| 6 | C++/Qt приложение | экраны из потока выше, 3D на Qt Quick 3D или QOpenGLWidget, конструктор пайплайна, чат | полный сценарий без терминала |
+| # | Stage | Done when |
+|---|---|---|
+| 0 | Manual control prototype: joint and Cartesian jog, gripper, 2 cameras, 3D skeleton, diagnostics, sim mode | works without the robot; with the robot: 6/6 motors answer, smooth motion on command (**done**) |
+| 1 | Model-to-hardware binding: joint signs and zeros, camera calibration, front camera pose | 3D skeleton matches the robot within 3 deg on 5 poses (signs and zeros **done**) |
+| 2 | MuJoCo digital twin: MJCF, table, cube; mirror and preview modes | mirror latency under 50 ms |
+| 3 | Data: LeRobotDataset episodes (2 cameras, state, action) from teleoperation | 50+ episodes, replay reproduces them |
+| 4 | Policies: train ACT and SmolVLA, policy server, success check from the camera | measured success rate on 20 trials |
+| 5 | Runtime as a service: `robotd` over ZeroMQ or gRPC, ROS 2 `ros2_control` interface | UI restarts without reconnecting the robot |
+| 6 | C++ / Qt 6 application with the full flow | the whole scenario runs without a terminal |
 
-## Модель данных пайплайна
+## Pipeline data model
 
-`Pipeline` = упорядоченный список `Action`.
+`Pipeline` = ordered list of `Action`.
 
-`Action`: `name`, `instruction` (текст из чата), `executor` (`policy` | `planner` | `script`),
-`checkpoint`, `dataset`, `params`, `success_predicate`, `timeout_s`, `on_fail` (`retry` | `stop`).
+`Action`: `name`, `instruction` (text), `executor` (`policy` | `planner` | `script`), `checkpoint`, `dataset`,
+`params`, `success_predicate`, `timeout_s`, `on_fail` (`retry` | `stop`).
 
-Выполнение: `Action` → executor → поток action chunks → safety-фильтр → робот; состояние →
-3D-вид и MuJoCo; предикат V → следующее действие, повтор или стоп.
-
-## Что нужно от пользователя
-
-- Блок питания робота и USB; это follower; есть ли leader-рука для телеуправления.
-- Калибровался ли робот через LeRobot. Если да, калибровка лежит в EEPROM моторов; json с той
-  машины тоже пригодится.
-- Доступ к GPU-серверу (SSH), какой GPU.
-- «Положить в руку» = в ладонь человека? Тогда нужна детекция руки (например, MediaPipe Hands).
-- Зафиксированное положение камер и стола.
+Execution: `Action` -> executor -> stream of action chunks -> safety filter -> robot; state -> 3D view and MuJoCo;
+success predicate -> next action, retry or stop.
