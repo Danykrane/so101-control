@@ -1,4 +1,5 @@
 import time
+from dataclasses import dataclass
 
 import numpy as np
 import pytest
@@ -10,7 +11,7 @@ from safety import MAX_STEP_PER_TICK, Limits, clip_target, limit_lead, step_towa
 ROBOT = kin.Robot()
 
 
-# --- кинематика ---------------------------------------------------------------------------
+# --- kinematics ---------------------------------------------------------------------------
 
 
 def random_q(rng, margin=0.15):
@@ -22,7 +23,7 @@ def test_fk_zero_pose_is_sane():
     T = ROBOT.fk(np.zeros(5))
     assert np.allclose(T[:3, :3] @ T[:3, :3].T, np.eye(3), atol=1e-9)
     x, y, z = T[:3, 3]
-    assert 0.3 < x < 0.45 and abs(y) < 0.01 and 0.15 < z < 0.3  # вытянута вперед
+    assert 0.3 < x < 0.45 and abs(y) < 0.01 and 0.15 < z < 0.3  # stretched forward
 
 
 def min_singular(q):
@@ -39,7 +40,7 @@ def test_ik_of_fk_returns_q():
     n = 0
     while n < 50:
         q = random_q(rng)
-        if min_singular(q) < 0.01:  # локоть почти выпрямлен (около -75°): решение не единственно
+        if min_singular(q) < 0.01:  # elbow almost straight (about -75 deg): solution is not unique
             continue
         n += 1
         target = ROBOT.task(q)
@@ -51,7 +52,7 @@ def test_ik_of_fk_returns_q():
 
 def test_ik_respects_limits_and_reports_unreachable():
     q = np.zeros(5)
-    far = ROBOT.task(q) + np.array([0.5, 0, 0, 0, 0])  # на 50 см дальше вытянутой руки
+    far = ROBOT.task(q) + np.array([0.5, 0, 0, 0, 0])  # 50 cm beyond the stretched arm
     sol, ok = ROBOT.ik(far, q)
     assert not ok
     assert np.all(sol >= ROBOT.lower[:5] - 1e-12) and np.all(sol <= ROBOT.upper[:5] + 1e-12)
@@ -59,7 +60,7 @@ def test_ik_respects_limits_and_reports_unreachable():
 
 def test_cartesian_step_is_small_in_joint_space():
     q = np.radians([0, -60, 60, 50, 0])
-    t = ROBOT.task(q) + np.array([0.0, 0.0, 0.005, 0, 0])  # +5 мм по Z
+    t = ROBOT.task(q) + np.array([0.0, 0.0, 0.005, 0, 0])  # +5 mm along Z
     sol, ok = ROBOT.ik(t, q)
     assert ok and np.degrees(np.max(np.abs(sol - q))) < 5
 
@@ -70,7 +71,7 @@ def test_joint_map_roundtrip_and_limits():
     assert np.allclose(m.to_motor(m.to_urdf(motor)), motor)
     lo, hi = m.motor_limits(ROBOT)
     assert np.all(lo < hi)
-    assert np.allclose(kin.JointMap.load().sign, 1)  # дефолтный файл: sign=+1
+    assert np.allclose(kin.JointMap.load().sign, 1)  # default file: sign=+1
 
 
 # --- safety -----------------------------------------------------------------------------------
@@ -81,7 +82,7 @@ LIM = Limits(np.array([-90.0] * 5 + [0.0]), np.array([90.0] * 5 + [100.0]))
 def test_clip_target_limits_and_outside_start():
     old = np.zeros(6)
     assert np.allclose(clip_target(np.full(6, 500.0), old, LIM), [90] * 5 + [100])
-    # сустав уже за лимитом: не прыгает на границу, но может вернуться внутрь
+    # joint already outside its limit: does not jump to the boundary but may move back inside
     old = np.array([120.0, 0, 0, 0, 0, 0])
     assert clip_target(old, old, LIM)[0] == 120.0
     assert clip_target(old + [10, 0, 0, 0, 0, 0], old, LIM)[0] == 120.0
@@ -91,9 +92,9 @@ def test_clip_target_limits_and_outside_start():
 def test_step_toward_is_bounded_and_synchronous():
     c = np.zeros(6)
     t = np.array([100.0, 50.0, 0, 0, 0, 100.0])
-    n = step_toward(c, t, max_arm=10, max_gripper=10)  # больше 2° за тик нельзя
+    n = step_toward(c, t, max_arm=10, max_gripper=10)  # no more than 2 deg per tick
     assert np.max(np.abs(n[:5])) == pytest.approx(MAX_STEP_PER_TICK)
-    assert n[1] == pytest.approx(n[0] / 2)  # синхронно: пропорция сохраняется
+    assert n[1] == pytest.approx(n[0] / 2)  # synchronous: proportions are kept
     assert n[5] == pytest.approx(MAX_STEP_PER_TICK)
     near = np.array([0.5, 0, 0, 0, 0, 0.5])
     assert np.allclose(step_toward(c, near, 1, 1), near)
@@ -110,7 +111,7 @@ def test_intersect():
     assert np.allclose(i.lower, 0) and np.allclose(i.upper, 10)
 
 
-# --- драйвер --------------------------------------------------------------------------------
+# --- driver --------------------------------------------------------------------------------
 
 
 def test_raw_motor_roundtrip():
@@ -145,7 +146,7 @@ def sim():
 
 def test_sim_no_motion_without_torque(sim):
     p0 = sim.state.present.copy()
-    sim.jog([10, 0, 0, 0, 0, 0])  # момент выключен: команда игнорируется
+    sim.jog([10, 0, 0, 0, 0, 0])  # torque off: the command is ignored
     time.sleep(0.3)
     assert not sim.state.torque_on
     assert np.allclose(sim.state.present, p0)
@@ -156,7 +157,7 @@ def test_sim_torque_jog_hold(sim):
     p0 = sim.state.present.copy()
     sim.enable_torque()
     assert wait_for(lambda: sim.state.torque_on)
-    assert np.allclose(sim.state.present, p0)  # включение момента не двигает руку
+    assert np.allclose(sim.state.present, p0)  # enabling torque does not move the arm
     sim.set_speed(60, 60)
     sim.jog([10, 0, 0, 0, 0, 0])
     prev, max_step = sim.state.command.copy(), 0.0
@@ -168,13 +169,22 @@ def test_sim_torque_jog_hold(sim):
         time.sleep(0.005)
     assert abs(sim.state.present[0] - p0[0] - 10) <= 0.2
     assert max_step <= MAX_STEP_PER_TICK + 1e-6
-    sim.jog([0, 0, 0, 0, 0, 1000])  # клип по лимиту гриппера
+    sim.jog([0, 0, 0, 0, 0, 1000])  # clipped to the gripper limit
     assert wait_for(lambda: sim.state.target[5] == 100.0)
     sim.hold()
     assert wait_for(lambda: np.allclose(sim.state.target, sim.state.present, atol=1.0))
 
 
-# --- FeetechDriver на фейковой шине: подключение ничего не пишет -----------------------------
+# --- FeetechDriver on a fake bus: connecting writes nothing -----------------------------
+
+
+@dataclass
+class MotorCalibration:  # same fields as lerobot.motors.MotorCalibration, so tests run without LeRobot
+    id: int
+    drive_mode: int
+    homing_offset: int
+    range_min: int
+    range_max: int
 
 
 class FakeBus:
@@ -188,8 +198,6 @@ class FakeBus:
         return drv.MODEL_NUMBER
 
     def read_calibration(self):
-        from lerobot.motors import MotorCalibration
-
         return {
             n: MotorCalibration(i, 0, 0, 2000 if n == "gripper" else 1000, 3400 if n == "gripper" else 3000)
             for n, i in drv.MOTOR_IDS.items()
@@ -235,7 +243,7 @@ def test_feetech_connect_writes_nothing(torque):
     assert bus.writes == []
     assert diags and diags[0].ok and len(diags[0].rows) == 6
     d.close()
-    assert bus.writes == [("disconnect", False)]  # закрытие не трогает момент
+    assert bus.writes == [("disconnect", False)]  # closing does not touch torque
 
 
 def test_feetech_torque_on_writes_goal_first():

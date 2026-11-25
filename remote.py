@@ -1,8 +1,8 @@
-"""RemoteDriver: клиент robotd с тем же API, что у RobotDriver.
+"""RemoteDriver: a robotd client with the same API as RobotDriver.
 
-Окно в режиме «robotd» смотрит на робота и управляет им, пока порт держит robotd. Так окно,
-robotctl и Claude (MCP) работают с одним роботом одновременно. Без Qt.
-Закрытие клиента не трогает ни момент, ни robotd.
+In "robotd" mode the GUI watches and controls the robot while robotd owns the serial port. This way the GUI,
+robotctl and an LLM agent (MCP) work with the same robot at the same time. No Qt.
+Closing the client touches neither the torque nor robotd.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ URL = "http://127.0.0.1:8765"
 
 
 def robotd_alive(url: str = URL, timeout: float = 0.3) -> bool:
-    """Запущен ли robotd (тогда порт робота занят им и окно подключается через него)."""
+    """Is robotd running (then it owns the robot port and the GUI connects through it)."""
     try:
         with urllib.request.urlopen(url + "/state", timeout=timeout) as r:
             return r.status == 200
@@ -52,7 +52,7 @@ class RemoteDriver:
         self._thread: threading.Thread | None = None
         self._limits: Limits | None = None
 
-    # --- API как у RobotDriver ---
+    # --- same API as RobotDriver ---
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="remote-driver", daemon=True)
@@ -78,7 +78,7 @@ class RemoteDriver:
             self._q.put(("/move", {"joints": joints, "wait": False}))
 
     def hold(self) -> None:
-        self._post("/stop", {})  # стоп сразу, мимо очереди
+        self._post("/stop", {})  # stop immediately, bypassing the queue
 
     def enable_torque(self) -> None:
         self._q.put(("/torque", {"on": True}))
@@ -104,12 +104,12 @@ class RemoteDriver:
         except urllib.error.HTTPError as e:
             self.on_log("robotd: " + json.loads(e.read() or b"{}").get("error", str(e)))
         except (urllib.error.URLError, OSError) as e:
-            self.on_log(f"robotd не отвечает: {e}")
+            self.on_log(f"robotd is not responding: {e}")
 
     def _to_state(self, s: dict) -> RobotState:
         lower, upper = _arr(s["limits"]["lower"]), _arr(s["limits"]["upper"])
         if self._limits is None or not (np.array_equal(self._limits.lower, lower) and np.array_equal(self._limits.upper, upper)):
-            self._limits = Limits(lower, upper)  # тот же объект, пока лимиты не менялись: окно не пересобирает слайдеры
+            self._limits = Limits(lower, upper)  # same object while limits are unchanged: the GUI does not rebuild sliders
         self.speed_arm, self.speed_gripper = s["speed"]["arm"], s["speed"]["gripper"]
         return RobotState(
             t=s["t"], mode="remote", connected=bool(s["connected"] and s.get("running", True)),
@@ -123,9 +123,9 @@ class RemoteDriver:
         try:
             d = self._req("/diag")
             self.on_diag(Diagnostics(f"robotd {d.get('port', '')}", bool(d.get("ok")), d.get("message", ""), d.get("rows", [])))
-            self.on_log(f"robotd {self.port}: подключено, {d.get('message', '')}")
+            self.on_log(f"robotd {self.port}: connected, {d.get('message', '')}")
         except (urllib.error.URLError, OSError, ValueError) as e:
-            self.on_log(f"robotd не отвечает на {self.port}: {e}. Запустите ./robotd.command")
+            self.on_log(f"robotd is not responding at {self.port}: {e}. Start ./robotd.command")
             return
         seen: list[str] = []
         period, tick, fails = 1.0 / self.hz, 0, 0
@@ -140,7 +140,7 @@ class RemoteDriver:
             try:
                 self.state = self._to_state(self._req("/state"))
                 self.on_state(self.state)
-                if tick % 10 == 0:  # лог robotd в окно, около 2 Гц
+                if tick % 10 == 0:  # forward the robotd log to the GUI, about 2 Hz
                     lines = self._req("/log?n=20")["log"]
                     new = [ln for ln in lines if ln not in seen]
                     for ln in new:
@@ -149,12 +149,12 @@ class RemoteDriver:
             except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
                 fails += 1
                 if fails == 1:
-                    self.on_log(f"robotd не отвечает ({e}), жду: перезапуск robotd подхватится сам")
+                    self.on_log(f"robotd is not responding ({e}), waiting: a restarted robotd is picked up automatically")
                 if fails == 10 and self.state is not None:
                     self.on_state(self._offline(self.state))
             else:
                 if fails >= 10:
-                    self.on_log("robotd снова на связи")
+                    self.on_log("robotd is back online")
                 fails = 0
             tick += 1
             self._stop.wait(max(0.0, period - (time.monotonic() - t0)))

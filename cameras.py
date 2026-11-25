@@ -1,7 +1,7 @@
-"""Камеры: список устройств macOS и захват OpenCV/AVFoundation в своем потоке на камеру.
+"""Cameras: macOS device list and OpenCV/AVFoundation capture, one thread per camera.
 
-Без Qt: используют и окно, и robotd. Логика захвата взята из so101_camera_monitor и упрощена.
-Доступ к камере macOS выдает приложению, из которого запущен процесс (Terminal), а не Python.
+No Qt: used by both the GUI and robotd.
+macOS grants camera access to the parent application (Terminal), not to Python.
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ import numpy as np
 
 
 def list_cameras() -> list[dict]:
-    """Камеры в порядке индексов OpenCV: AVFoundation-бэкенд OpenCV сортирует устройства по
-    uniqueID, system_profiler дает имя и uniqueID. Пустой список, если узнать не удалось."""
+    """Cameras in OpenCV index order: the OpenCV AVFoundation backend sorts devices by
+    uniqueID, system_profiler gives the name and uniqueID. Empty list if this cannot be determined."""
     if platform.system() != "Darwin":
         return []
     try:
@@ -40,7 +40,7 @@ def list_cameras() -> list[dict]:
 
 
 class Grabber(threading.Thread):
-    """Захват одной камеры. Последний кадр (BGR) и FPS читаются из любого потока."""
+    """Capture from one camera. The latest frame (BGR) and FPS can be read from any thread."""
 
     def __init__(self, index: int):
         super().__init__(name=f"camera-{index}", daemon=True)
@@ -58,7 +58,7 @@ class Grabber(threading.Thread):
             self.join(timeout)
 
     def latest(self) -> tuple[int, np.ndarray | None]:
-        """(номер кадра, кадр BGR); номер растет с каждым новым кадром."""
+        """(frame number, BGR frame); the number grows with every new frame."""
         with self._lock:
             return self._seq, self._frame
 
@@ -76,7 +76,7 @@ class Grabber(threading.Thread):
         cap = cv2.VideoCapture(self.index, backend)
         try:
             if not cap.isOpened():
-                self.error = f"камера #{self.index} не открылась (индекс, доступ к камере у Terminal, занята?)"
+                self.error = f"camera #{self.index} failed to open (index, Terminal camera permission, busy?)"
                 return
             times: deque[float] = deque(maxlen=30)
             failures = 0
@@ -85,7 +85,7 @@ class Grabber(threading.Thread):
                 if not ok or bgr is None:
                     failures += 1
                     if failures > 40:
-                        self.error = f"камера #{self.index}: нет кадров"
+                        self.error = f"camera #{self.index}: no frames"
                         return
                     time.sleep(0.05)
                     continue

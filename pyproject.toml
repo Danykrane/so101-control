@@ -1,0 +1,19 @@
+[project]
+name = "so101-control"
+version = "0.1.0"
+description = "Safety-first control stack for the SO-101 robot arm: driver, URDF kinematics, safety filter, HTTP daemon, MCP server for LLM agents, PyQt6 GUI."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501", "E702", "B905"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -1,11 +1,11 @@
-"""Кинематика SO-101 по URDF: FK, численный IK, лимиты, отображение моторных углов в URDF.
+"""SO-101 kinematics from URDF: FK, numerical IK, limits, mapping motor angles to URDF.
 
-Без Qt и без железа: модуль потом переедет в robotd и в C++.
+No Qt and no hardware: the module is meant to move into robotd and later to C++.
 
-Единицы:
-- «моторные» значения: 5 суставов в градусах LeRobot (DEGREES, 0 = середина диапазона
-  калибровки), гриппер в процентах 0..100 (RANGE_0_100);
-- URDF: радианы, метры.
+Units:
+- "motor" values: 5 joints in LeRobot degrees (DEGREES, 0 = middle of the calibration
+  range), gripper in percent 0..100 (RANGE_0_100);
+- URDF: radians, meters.
 """
 
 from __future__ import annotations
@@ -65,13 +65,13 @@ class Joint:
     child: str
     origin: np.ndarray  # 4x4
     axis: np.ndarray  # (3,)
-    lower: float  # рад
-    upper: float  # рад
+    lower: float  # rad
+    upper: float  # rad
     revolute: bool
 
 
 class Robot:
-    """Цепь base_link → gripper_frame_link плюс ветка подвижной губки гриппера."""
+    """Chain base_link -> gripper_frame_link plus the branch of the moving gripper jaw."""
 
     def __init__(self, urdf_path: Path = URDF_PATH):
         root = ET.parse(urdf_path).getroot()
@@ -104,17 +104,17 @@ class Robot:
         self.chain: list[Joint] = chain[::-1]
         names = [j.name for j in self.chain if j.revolute]
         if tuple(names) != ARM:
-            raise ValueError(f"Неожиданная цепь URDF: {names}")
+            raise ValueError(f"Unexpected URDF chain: {names}")
         self.gripper = self.joints["gripper"]
         self.lower = np.array([self.joints[n].lower for n in JOINTS])
         self.upper = np.array([self.joints[n].upper for n in JOINTS])
-        # Кончик подвижной губки: точка EE в системе губки при q_gripper = 0 (закрыт).
+        # Tip of the moving jaw: the EE point in the jaw frame at q_gripper = 0 (closed).
         frames = self.frames(np.zeros(6))
         jaw0 = frames["jaw"]
         self._jaw_tip = (np.linalg.inv(jaw0) @ np.append(frames["ee"][:3, 3], 1.0))[:3]
 
     def frames(self, q: np.ndarray) -> dict[str, np.ndarray]:
-        """Системы координат (4x4, в базе): по одной на каждый сустав цепи, 'ee', 'jaw'."""
+        """Frames (4x4, in the base frame): one per chain joint, plus 'ee' and 'jaw'."""
         q = np.asarray(q, dtype=float)
         out: dict[str, np.ndarray] = {}
         T = np.eye(4)
@@ -122,7 +122,7 @@ class Robot:
         for j in self.chain:
             T = T @ j.origin
             if j.revolute:
-                out[j.name] = T.copy()  # система сустава до поворота: ось и точка шарнира
+                out[j.name] = T.copy()  # joint frame before rotation: axis and pivot point
                 R = np.eye(4)
                 R[:3, :3] = _axis_angle(j.axis, q[i])
                 T = T @ R
@@ -138,7 +138,7 @@ class Robot:
         return out
 
     def fk(self, q: np.ndarray) -> np.ndarray:
-        """Поза EE (4x4) для q (рад, 5 или 6 значений)."""
+        """EE pose (4x4) for q (rad, 5 or 6 values)."""
         T = np.eye(4)
         i = 0
         for j in self.chain:
@@ -151,7 +151,7 @@ class Robot:
         return T
 
     def skeleton(self, q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Точки для 3D: (шарниры Nx3, кончик губки 3). Шарниры: база, 5 суставов, EE."""
+        """Points for 3D drawing: (joints Nx3, jaw tip 3). Joints: base, 5 joints, EE."""
         f = self.frames(q)
         pts = [np.zeros(3)] + [f[n][:3, 3] for n in ARM] + [f["ee"][:3, 3]]
         jaw_tip = (f["jaw"] @ np.append(self._jaw_tip, 1.0))[:3]
@@ -160,14 +160,14 @@ class Robot:
     # --- task space: x, y, z, pitch, roll ---------------------------------------------
 
     def task(self, q: np.ndarray) -> np.ndarray:
-        """[x, y, z (м), pitch (рад), wrist_roll (рад)].
+        """[x, y, z (m), pitch (rad), wrist_roll (rad)].
 
-        pitch: наклон оси подхода (z гриппера) относительно горизонтали в плоскости руки,
-        > 0 вниз. Плоскость руки задает ось shoulder_lift, поэтому pitch непрерывен и за 90°.
+        pitch: tilt of the approach axis (gripper z) from horizontal in the arm plane,
+        > 0 is down. The arm plane is defined by the shoulder_lift axis, so pitch stays continuous past 90 deg.
         """
         T = self.fk(q)
         n = self._lift_axis(q)
-        u = np.cross(n, [0.0, 0.0, 1.0])  # горизонталь в плоскости руки, при pan=0 это +X
+        u = np.cross(n, [0.0, 0.0, 1.0])  # horizontal in the arm plane, +X at pan=0
         a = T[:3, 2]
         pitch = math.atan2(-a[2], float(np.dot(a, u)))
         return np.array([*T[:3, 3], pitch, q[4]])
@@ -194,15 +194,15 @@ class Robot:
         damping: float = 0.003,
         ang_weight: float = 0.1,
     ) -> tuple[np.ndarray, bool]:
-        """Damped least squares по 5 суставам. target = task-вектор. Возвращает (q, сошлось).
+        """Damped least squares over 5 joints. target = task vector. Returns (q, converged).
 
-        Демпфирование адаптивное (Левенберг–Марквардт): шаг принимается, только если ошибка
-        уменьшилась, иначе демпфирование растет. Так IK не уходит далеко от q0 у сингулярности
-        (локоть выпрямлен) и у лимитов.
+        Adaptive damping (Levenberg-Marquardt): a step is accepted only if the error decreased,
+        otherwise damping grows. This keeps IK close to q0 near the singularity
+        (straight elbow) and near the limits.
         """
         lower = self.lower[:5] if lower is None else lower[:5]
         upper = self.upper[:5] if upper is None else upper[:5]
-        w = np.array([1.0, 1.0, 1.0, ang_weight, ang_weight])  # метры против радиан: 1 рад ≈ 10 см
+        w = np.array([1.0, 1.0, 1.0, ang_weight, ang_weight])  # meters vs radians: 1 rad ~ 10 cm
         eps = 1e-6
 
         def error(q):
@@ -239,7 +239,7 @@ class Robot:
 
 @dataclass
 class JointMap:
-    """URDF-угол = sign · (моторное значение − zero), в градусах. Гриппер так же (проценты ≈ градусы)."""
+    """URDF angle = sign * (motor value - zero), in degrees. Same for the gripper (percent ~ degrees)."""
 
     sign: np.ndarray  # (6,)
     zero: np.ndarray  # (6,)
@@ -256,27 +256,27 @@ class JointMap:
         sign = np.array([float(data.get(n, {}).get("sign", 1)) for n in JOINTS])
         zero = np.array([float(data.get(n, {}).get("zero_deg", 0.0)) for n in JOINTS])
         if not np.all(np.isin(sign, (-1.0, 1.0))):
-            raise ValueError(f"{path}: sign должен быть +1 или -1")
+            raise ValueError(f"{path}: sign must be +1 or -1")
         return cls(sign, zero)
 
     def to_urdf(self, motor: np.ndarray) -> np.ndarray:
-        """Моторные значения (6) → радианы URDF (6)."""
+        """Motor values (6) -> URDF radians (6)."""
         return np.radians(self.sign * (np.asarray(motor, dtype=float) - self.zero))
 
     def to_motor(self, urdf: np.ndarray) -> np.ndarray:
-        """Радианы URDF (5 или 6) → моторные значения той же длины."""
+        """URDF radians (5 or 6) -> motor values of the same length."""
         n = len(urdf)
         return self.zero[:n] + self.sign[:n] * np.degrees(np.asarray(urdf, dtype=float))
 
     def motor_limits(self, robot: Robot) -> tuple[np.ndarray, np.ndarray]:
-        """Лимиты URDF в моторных единицах (с учетом знака)."""
+        """URDF limits in motor units (sign taken into account)."""
         a, b = self.to_motor(robot.lower), self.to_motor(robot.upper)
         return np.minimum(a, b), np.maximum(a, b)
 
 
-# --- декартово движение: общее для окна, robotd и MCP ------------------------------------
+# --- Cartesian motion: shared by the GUI, robotd and MCP ------------------------------------
 
-MAX_IK_JUMP_DEG = 15.0  # больше за один подшаг = рядом сингулярность, движение не выполняем
+MAX_IK_JUMP_DEG = 15.0  # a larger jump in one sub-step means a nearby singularity: refuse the move
 
 
 def plan_cartesian(
@@ -288,15 +288,15 @@ def plan_cartesian(
     step_m: float = 0.01,
     step_rad: float = math.radians(5),
 ) -> tuple[np.ndarray | None, str]:
-    """Цель суставов для декартовой цели goal = [x, y, z (м), pitch, roll (рад)].
+    """Joint target for a Cartesian goal = [x, y, z (m), pitch, roll (rad)].
 
-    target: текущая цель суставов (6, моторные единицы), limits: Limits в моторных единицах.
-    Путь до goal режется на подшаги ≤ step_m / step_rad, IK решается по цепочке от текущей позы,
-    чтобы не перескочить на другую ветвь решения. → (цель 6 с NaN у гриппера, "") или (None, причина).
+    target: current joint target (6, motor units), limits: Limits in motor units.
+    The path to goal is split into sub-steps <= step_m / step_rad and IK is chained from the current pose
+    so it does not jump to another solution branch. -> (target 6 with NaN for the gripper, "") or (None, reason).
     """
     q = jmap.to_urdf(target)
     a, b = jmap.to_urdf(limits.lower), jmap.to_urdf(limits.upper)
-    lo = np.minimum(np.maximum(np.minimum(a, b), robot.lower), q)  # сустав за лимитом не тянем на границу
+    lo = np.minimum(np.maximum(np.minimum(a, b), robot.lower), q)  # a joint outside its limit is not pulled to the boundary
     hi = np.maximum(np.minimum(np.maximum(a, b), robot.upper), q)
     start = robot.task(q[:5])
     goal = np.asarray(goal, dtype=float)
@@ -307,10 +307,10 @@ def plan_cartesian(
     for k in range(1, n + 1):
         new, ok = robot.ik(start + d * k / n, sol, lo, hi)
         if not ok:
-            return None, f"IK: точка {k}/{n} недостижима (лимиты или рабочая зона)"
+            return None, f"IK: waypoint {k}/{n} is unreachable (limits or workspace)"
         jump = math.degrees(float(np.max(np.abs(new - sol))))
         if jump > MAX_IK_JUMP_DEG:
-            return None, f"IK: подшаг требует поворота сустава на {jump:.0f}° (рядом сингулярность)"
+            return None, f"IK: sub-step needs a {jump:.0f} deg joint jump (singularity nearby)"
         sol = new
     out = np.full(6, np.nan)
     out[:5] = jmap.to_motor(sol)

@@ -1,6 +1,6 @@
-"""Safety-фильтр: лимиты и ограничение шага. Чистые функции на numpy, без Qt и железа.
+"""Safety filter: joint limits and step limiting. Pure numpy functions, no Qt and no hardware.
 
-Все массивы длины 6 в моторных единицах: 5 суставов в градусах, гриппер в процентах.
+All arrays have length 6 in motor units: 5 joints in degrees, the gripper in percent.
 """
 
 from __future__ import annotations
@@ -9,13 +9,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-MAX_STEP_PER_TICK = 2.0  # градусов (и процентов гриппера) за тик, как max_relative_target у so101-tiptop
-MAX_LEAD = 10.0  # насколько отправляемая цель может опережать фактическую позицию
-# Компенсация провисания: P-регулятор мотора (P=16) под весом руки недотягивает 1–2°.
-MAX_BIAS = 3.0  # ° наибольшая добавка к отправляемой цели
-BIAS_WINDOW = 6.0  # ° ошибка больше = упор или столкновение, туда не копим
-BIAS_DEADBAND = 0.15  # ° мертвая зона сервопривода (около 2 шагов энкодера)
-SETTLED_SPEED = 3.0  # °/с сустав считается стоящим
+MAX_STEP_PER_TICK = 2.0  # degrees (and gripper percent) per tick, like LeRobot max_relative_target
+MAX_LEAD = 10.0  # how far the commanded goal may run ahead of the measured position
+# Sag compensation: the servo P controller (P=16) falls 1-2 deg short under the arm weight.
+MAX_BIAS = 3.0  # deg, largest offset added to the commanded goal
+BIAS_WINDOW = 6.0  # deg, a larger error means a hard stop or collision: do not integrate there
+BIAS_DEADBAND = 0.15  # deg, servo dead band (about 2 encoder ticks)
+SETTLED_SPEED = 3.0  # deg/s, below this a joint counts as settled
 ARM = slice(0, 5)
 GRIPPER = 5
 
@@ -31,23 +31,23 @@ class Limits:
 
     def intersect(self, other: Limits) -> Limits:
         lo, hi = np.maximum(self.lower, other.lower), np.minimum(self.upper, other.upper)
-        # Пустое пересечение (кривая калибровка) не делаем шире: сустав стоит на месте.
+        # An empty intersection (bad calibration) is not widened: the joint stays where it is.
         return Limits(np.minimum(lo, hi), hi)
 
 
 def clip_target(new: np.ndarray, old: np.ndarray, limits: Limits) -> np.ndarray:
-    """Клип цели по лимитам. Если сустав уже за лимитом, ему можно только возвращаться внутрь,
-    но не прыгать на границу: иначе включение момента вне лимитов дернуло бы руку."""
+    """Clip the goal to the limits. A joint that is already outside its limit may only move back inside,
+    never jump to the boundary: otherwise enabling torque outside the limits would jerk the arm."""
     lo = np.minimum(limits.lower, old)
     hi = np.maximum(limits.upper, old)
     return np.clip(new, lo, hi)
 
 
 def step_toward(command: np.ndarray, target: np.ndarray, max_arm: float, max_gripper: float) -> np.ndarray:
-    """Один тик регулятора скорости: сдвинуть command к target.
+    """One tick of the speed governor: move command towards target.
 
-    Суставы руки двигаются синхронно (общий масштаб, все приходят одновременно, путь в
-    пространстве суставов прямой), гриппер отдельно. Шаг за тик не больше MAX_STEP_PER_TICK.
+    Arm joints move synchronously (common scale, all arrive at the same time, straight path in
+    joint space), the gripper separately. The step per tick is at most MAX_STEP_PER_TICK.
     """
     max_arm = min(max_arm, MAX_STEP_PER_TICK)
     max_gripper = min(max_gripper, MAX_STEP_PER_TICK)
@@ -63,17 +63,17 @@ def step_toward(command: np.ndarray, target: np.ndarray, max_arm: float, max_gri
 
 
 def limit_lead(command: np.ndarray, present: np.ndarray, lead: float = MAX_LEAD) -> np.ndarray:
-    """Не давать отправляемой цели убегать от фактической позиции (застрял, упирается, лагает)."""
+    """Keep the commanded goal from running away from the measured position (stuck, blocked, lagging)."""
     return np.clip(command, present - lead, present + lead)
 
 
 def integrate_bias(bias, target, present, command, speed, dt: float, ki: float) -> np.ndarray:
-    """Внешний I-контур против провисания под весом: добавка к отправляемой цели.
+    """Outer I-loop against sag under gravity: an offset added to the commanded goal.
 
-    Копит только по суставам руки, которые стоят (|speed| < SETTLED_SPEED), чья цель уже
-    отправлена целиком (command = target) и чья ошибка в окне (BIAS_DEADBAND, BIAS_WINDOW).
-    Большая ошибка значит упор или столкновение: там не копим, чтобы не давить сильнее.
-    Гриппер не трогаем: сжимая предмет, он и должен недотягивать. |добавка| ≤ MAX_BIAS.
+    Integrates only for arm joints that are settled (|speed| < SETTLED_SPEED), whose goal has been
+    sent completely (command = target) and whose error is within (BIAS_DEADBAND, BIAS_WINDOW).
+    A large error means a hard stop or collision: no integration there, so we never push harder.
+    The gripper is left alone: when squeezing an object it is supposed to fall short. |bias| <= MAX_BIAS.
     """
     err = np.asarray(target, dtype=float) - present
     active = (
@@ -89,7 +89,7 @@ def integrate_bias(bias, target, present, command, speed, dt: float, ki: float) 
 
 
 def compensated(command, bias, present, sent, limits: Limits) -> np.ndarray:
-    """Что отправить в моторы: command + bias в лимитах (сустав за лимитом не тянем на границу)
-    и не дальше MAX_STEP_PER_TICK от прошлой отправки."""
+    """What to send to the motors: command + bias within limits (a joint outside its limit is not pulled
+    to the boundary) and no further than MAX_STEP_PER_TICK from the previous send."""
     out = np.clip(np.asarray(command, dtype=float) + bias, np.minimum(limits.lower, present), np.maximum(limits.upper, present))
     return sent + np.clip(out - sent, -MAX_STEP_PER_TICK, MAX_STEP_PER_TICK)

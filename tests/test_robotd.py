@@ -1,6 +1,5 @@
-"""robotd в sim-режиме (без HTTP), декартов планировщик, остановка потока камеры."""
+"""robotd in sim mode (no HTTP), Cartesian planner, camera thread shutdown."""
 
-import math
 import threading
 
 import numpy as np
@@ -22,7 +21,7 @@ def test_plan_cartesian_reaches_goal_and_rejects_far():
     goal[2] -= 0.04
     t, msg = kin.plan_cartesian(ROBOT, JMAP, READY, LIMITS, goal)
     assert t is not None, msg
-    assert np.isnan(t[5])  # гриппер не трогаем
+    assert np.isnan(t[5])  # gripper untouched
     q = READY.copy()
     q[:5] = t[:5]
     assert np.allclose(ROBOT.task(JMAP.to_urdf(q)[:5])[:3], goal[:3], atol=1e-4)
@@ -59,10 +58,10 @@ def test_robotd_clips_and_cartesian(app):
     assert res["clipped"] == ["shoulder_lift"] and res["target"][1] <= LIMITS.upper[1] + 1e-6
     app.move({"joints": dict(zip(kin.JOINTS, READY)), "timeout": 15})
     z0 = app.state_json()["ee_target"]["z"]
-    res = app.cartesian({"dz": -20, "timeout": 10})  # вверх из READY нельзя: кисть упрется в лимит 95°
+    res = app.cartesian({"dz": -20, "timeout": 10})  # cannot go up from READY: the wrist hits its 95 deg limit
     assert res["reached"], res["reason"]
     assert abs(res["state"]["ee_target"]["z"] - (z0 - 20)) < 0.5
-    with pytest.raises(ValueError):  # ниже стола
+    with pytest.raises(ValueError):  # below the table
         app.cartesian({"z": -80})
 
 
@@ -74,9 +73,9 @@ def test_robotd_wait_notices_foreign_stop(app):
     t.start()
     while app.state.command[0] < 2:
         pass
-    app.stop()  # как «СТОП» в окне
+    app.stop()  # like STOP in the GUI
     t.join(5)
-    assert result["reached"] is False and "другой клиент" in result["reason"]
+    assert result["reached"] is False and "another client" in result["reason"]
 
 
 def test_grabber_stop_after_thread_finished():
@@ -87,5 +86,5 @@ def test_grabber_stop_after_thread_finished():
     g = Quick(99)
     g.start()
     g.join(1)
-    g.stop()  # раньше падало: поле _stop затирало Thread._stop
+    g.stop()  # used to crash: the _stop field shadowed Thread._stop
     assert not g.is_alive()

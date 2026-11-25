@@ -1,6 +1,10 @@
-# Ставится в .venv поверх conda lerobot (--system-site-packages): lerobot, rustypot, numpy, opencv берутся оттуда.
-# Не ставить opencv-python: конфликт Qt-плагинов с opencv-python-headless из lerobot.
+# Core (simulation, kinematics, robotd, tests)
+numpy>=1.26
+opencv-python-headless>=4.9
+pytest>=8
+# GUI (app.py)
 PyQt6>=6.7
 pyqtgraph>=0.13
 PyOpenGL>=3.1
-pytest>=8
+# Real hardware: LeRobot (Apache-2.0) provides the Feetech SerialMotorsBus.
+# Install it separately, see README. MCP server: robot_mcp.py runs with `uv run --with "mcp>=1.10,<2"`.

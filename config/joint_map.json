@@ -1,5 +1,5 @@
 {
-  "_comment": "URDF-угол = sign * (угол LeRobot - zero_deg). sign = +1 или -1. Гриппер: проценты 0..100 как градусы. Подбирается на этапе 1 по снимку камеры.",
+  "_comment": "URDF angle = sign * (LeRobot angle - zero_deg). sign = +1 or -1. Gripper: percent 0..100 treated as degrees.",
   "shoulder_pan": {"sign": 1, "zero_deg": 0.0},
   "shoulder_lift": {"sign": 1, "zero_deg": 0.0},
   "elbow_flex": {"sign": 1, "zero_deg": 0.0},

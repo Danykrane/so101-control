@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-"""robotd: держит порт SO-101 и камеры, принимает команды по HTTP на 127.0.0.1:8765.
+"""robotd: owns the SO-101 serial port and cameras, accepts commands over HTTP on 127.0.0.1:8765.
 
-Клиенты: robotctl.py (CLI), robot_mcp.py (MCP для Claude), окно app.py в режиме «robotd».
-Правила те же, что в driver.py: подключение только читает, момент включается только командой
-(Goal = Present, потом Torque_Enable), цель клипуется по лимитам, скорость ограничена.
-При выходе (Ctrl+C, закрытие окна Terminal, /shutdown) момент не трогается, если не попросить release.
+Clients: robotctl.py (CLI), robot_mcp.py (MCP server for an LLM agent), the app.py GUI in "robotd" mode.
+Same rules as driver.py: connecting only reads, torque is enabled only by an explicit command
+(Goal = Present, then Torque_Enable), goals are clipped to the limits, speed is limited.
+On exit (Ctrl+C, closing the Terminal window, /shutdown) torque is left as is unless release is requested.
 
-Запускать из Terminal (`./robotd.command`): доступ к камере macOS выдает приложению-родителю.
+Run it from Terminal (`./robotd.command`): macOS grants camera access to the parent application.
 
 API, JSON:
-  GET  /state                  суставы, момент, телеметрия, поза EE
-  GET  /diag                   диагностика моторов при подключении
-  GET  /log?n=50               последние сообщения
-  GET  /cameras                список камер
-  GET  /camera/<i>.jpg?w=640   снимок камеры
+  GET  /state                  joints, torque, telemetry, EE pose
+  GET  /diag                   motor diagnostics captured on connect
+  GET  /log?n=50               latest log messages
+  GET  /cameras                camera list
+  GET  /camera/<i>.jpg?w=640   camera snapshot
   POST /torque     {"on": true}
-  POST /stop                   цель = текущая позиция, удержание
+  POST /stop                   goal = current position, hold
   POST /move       {"joints": {"elbow_flex": 10}, "relative": false, "wait": true, "timeout": 20}
-                   {"pose": "rest"} = поза покоя (config/rest_pose.json, пишется при подключении без момента)
-  POST /cartesian  {"dx": мм, "dy": мм, "dz": мм, "dpitch": °, "droll": °, "wait": true}
-                   или абсолютно {"x": мм, "y": мм, "z": мм, "pitch": °, "roll": °}
-  POST /speed      {"arm": °/с, "gripper": %/с}
+                   {"pose": "rest"} = rest pose (config/rest_pose.json, recorded on connect without torque)
+  POST /cartesian  {"dx": mm, "dy": mm, "dz": mm, "dpitch": deg, "droll": deg, "wait": true}
+                   or absolute {"x": mm, "y": mm, "z": mm, "pitch": deg, "roll": deg}
+  POST /speed      {"arm": deg/s, "gripper": %/s}
   POST /shutdown   {"release": false}
 """
 
@@ -46,17 +46,17 @@ from kinematics import HERE, JOINTS, JointMap, Robot, plan_cartesian
 from safety import Limits
 
 HOST, PORT = "127.0.0.1", 8765
-REST_PATH = HERE / "config" / "rest_pose.json"  # сложенная поза: робот лежит без момента
+REST_PATH = HERE / "config" / "rest_pose.json"  # folded pose: the robot rests without torque
 ALIASES = {
     "pan": "shoulder_pan", "lift": "shoulder_lift", "shoulder": "shoulder_lift", "elbow": "elbow_flex",
     "wrist": "wrist_flex", "flex": "wrist_flex", "roll": "wrist_roll", "grip": "gripper",
 }
-TOLERANCE = np.array([1.0] * 5 + [3.0])  # «дошел»: ° и %; провисание под весом снимает I-контур драйвера
-STALL_S = 1.5  # команда дошла до цели, а ошибка не уменьшается столько секунд = упор или предмет
+TOLERANCE = np.array([1.0] * 5 + [3.0])  # "arrived": deg and %; sag under gravity is removed by the driver I-loop
+STALL_S = 1.5  # command reached its goal but the error has not shrunk for this long = hard stop or object
 
 
 class Busy(Exception):
-    """Команду нельзя выполнить сейчас (момент выключен, нет связи): HTTP 409."""
+    """The command cannot run now (torque off, no link): HTTP 409."""
 
 
 def _num(x, nd=2):
@@ -74,7 +74,7 @@ class Robotd:
         self.logs: deque[str] = deque(maxlen=500)
         self.diag = None
         self.z_min = z_min_mm / 1000.0
-        self.motion = threading.Lock()  # одна команда движения за раз
+        self.motion = threading.Lock()  # one motion command at a time
         urdf_limits = Limits(*self.jmap.motor_limits(self.robot))
         cb = dict(on_log=self.log, on_diag=self._on_diag)
         self.driver = SimDriver(urdf_limits, **cb) if sim else FeetechDriver(port, urdf_limits, **cb)
@@ -84,11 +84,11 @@ class Robotd:
         self.grabbers: dict[int, Grabber] = {}
         for i in cams:
             if i in builtin:
-                self.log(f"Камера {i} встроенная (FaceTime), не открываю")
+                self.log(f"Camera {i} is built-in (FaceTime), not opening it")
                 continue
             self.grabbers[i] = Grabber(i)
 
-    # --- служебное ---
+    # --- internals ---
 
     def log(self, msg: str) -> None:
         line = f"{datetime.now():%H:%M:%S}  {msg}"
@@ -100,7 +100,7 @@ class Robotd:
 
     def start(self) -> None:
         names = ", ".join(f"{c['index']}={c['name']}" for c in self.camera_list)
-        self.log(f"Камеры: {names or 'нет'}, открываю {sorted(self.grabbers) or 'ни одной'}")
+        self.log(f"Cameras: {names or 'none'}, opening {sorted(self.grabbers) or 'none'}")
         for g in self.grabbers.values():
             g.start()
         self.driver.start()
@@ -111,11 +111,11 @@ class Robotd:
         if s is not None and s.connected and s.mode == "real" and not s.torque.any():
             pose = {n: round(float(v), 1) for n, v in zip(JOINTS, s.present)}
             REST_PATH.write_text(json.dumps(pose, indent=1) + "\n", encoding="utf-8")
-            self.log(f"Поза покоя записана в {REST_PATH.name}: {list(pose.values())}")
+            self.log(f"Rest pose saved to {REST_PATH.name}: {list(pose.values())}")
 
     def rest_pose(self) -> np.ndarray:
         if not REST_PATH.exists():
-            raise Busy("позы покоя нет: она записывается, когда robotd подключается к роботу без момента")
+            raise Busy("no rest pose yet: it is recorded when robotd connects to the robot with torque off")
         data = json.loads(REST_PATH.read_text(encoding="utf-8"))
         return np.array([float(data[n]) for n in JOINTS])
 
@@ -131,9 +131,9 @@ class Robotd:
     def _ready(self):
         s = self.state
         if not (self.driver.running and s and s.connected):
-            raise Busy("робот не подключен")
+            raise Busy("robot is not connected")
         if not s.torque_on:
-            raise Busy("момент выключен: сначала POST /torque {\"on\": true}")
+            raise Busy("torque is off: POST /torque {\"on\": true} first")
         return s
 
     def _pose(self, q_motor) -> dict:
@@ -141,7 +141,7 @@ class Robotd:
         return {"x": _num(p[0] * 1000, 1), "y": _num(p[1] * 1000, 1), "z": _num(p[2] * 1000, 1),
                 "pitch": _num(math.degrees(p[3]), 1), "roll": _num(math.degrees(p[4]), 1)}
 
-    # --- ответы ---
+    # --- responses ---
 
     def state_json(self) -> dict:
         s = self.state
@@ -164,12 +164,12 @@ class Robotd:
         rows = [{k: (v.item() if hasattr(v, "item") else v) for k, v in r.items()} for r in d.rows]
         return {"port": d.port, "ok": d.ok, "message": d.message, "rows": rows}
 
-    # --- команды ---
+    # --- commands ---
 
     def torque(self, on: bool) -> dict:
         s = self.state
         if not (self.driver.running and s and s.connected):
-            raise Busy("робот не подключен")
+            raise Busy("robot is not connected")
         t0 = time.time()
         self.driver.enable_torque() if on else self.driver.disable_torque()
         self._wait_tick(t0)
@@ -193,7 +193,7 @@ class Robotd:
         s = self._ready()
         if body.get("pose"):
             if body["pose"] != "rest":
-                raise ValueError(f"неизвестная поза {body['pose']!r}; есть rest")
+                raise ValueError(f"unknown pose {body['pose']!r}; available: rest")
             goal = self.rest_pose()
         else:
             joints = body.get("joints") or {}
@@ -201,7 +201,7 @@ class Robotd:
             for name, value in joints.items():
                 name = ALIASES.get(name, name)
                 if name not in JOINTS:
-                    raise ValueError(f"неизвестный сустав {name!r}; есть {', '.join(JOINTS)}")
+                    raise ValueError(f"unknown joint {name!r}; available: {', '.join(JOINTS)}")
                 i = JOINTS.index(name)
                 goal[i] = (s.target[i] if body.get("relative") else 0.0) + float(value)
         return self._go(goal, body)
@@ -224,7 +224,7 @@ class Robotd:
             goal[3] += math.radians(float(body.get("dpitch", 0.0)))
             goal[4] += math.radians(float(body.get("droll", 0.0)))
         if goal[2] < self.z_min:
-            raise ValueError(f"z = {goal[2] * 1000:.0f} мм ниже допустимого {self.z_min * 1000:.0f} мм (стол)")
+            raise ValueError(f"z = {goal[2] * 1000:.0f} mm is below the allowed {self.z_min * 1000:.0f} mm (table)")
         target, msg = plan_cartesian(self.robot, self.jmap, s.target, s.limits, goal)
         if target is None:
             raise ValueError(msg)
@@ -243,14 +243,14 @@ class Robotd:
             clipped = [JOINTS[i] for i in range(6) if abs(s.target[i] - requested[i]) > 0.05]
             out = {"accepted": True, "requested": _arr(requested), "target": _arr(s.target), "clipped": clipped}
             if clipped:
-                self.log(f"Цель обрезана лимитами: {', '.join(clipped)}")
+                self.log(f"Goal clipped by limits: {', '.join(clipped)}")
             if wait:
                 out["reached"], out["reason"] = self._wait_reached(timeout, s.target.copy())
             out["state"] = self.state_json()
             return out
 
     def _wait_tick(self, t0: float, timeout: float = 1.0) -> None:
-        """Дождаться тика драйвера после t0: команда из очереди применена."""
+        """Wait for a driver tick after t0: the queued command has been applied."""
         end = time.time() + timeout
         while time.time() < end:
             s = self.state
@@ -264,9 +264,9 @@ class Robotd:
         while time.monotonic() < end:
             s = self.state
             if not (s and s.connected and s.torque_on):
-                return False, "момент выключен или связь потеряна"
+                return False, "torque is off or the link was lost"
             if np.any(np.abs(s.target - target) > 0.05):
-                return False, "цель изменил другой клиент (СТОП в окне?)"
+                return False, "goal was changed by another client (STOP in the GUI?)"
             err = np.abs(s.present - s.target)
             settled = bool(np.all(np.abs(s.command - s.target) < 1e-3))
             if settled and np.all(err <= TOLERANCE):
@@ -276,21 +276,21 @@ class Robotd:
                 best, best_t = e, time.monotonic()
             elif settled and time.monotonic() - best_t > STALL_S:
                 j = JOINTS[int(np.argmax(err - TOLERANCE))]
-                return False, f"остановился не дойдя: {j} отстает на {err[JOINTS.index(j)]:.1f} (упор, предмет, нагрузка)"
+                return False, f"stopped short: {j} lags by {err[JOINTS.index(j)]:.1f} (hard stop, object, load)"
             time.sleep(0.03)
-        return False, "таймаут"
+        return False, "timeout"
 
     def camera_jpeg(self, index: int | None, width: int | None) -> bytes:
         if index is None:
             if not self.grabbers:
-                raise Busy("камеры не открыты")
+                raise Busy("cameras are not open")
             index = min(self.grabbers)
         g = self.grabbers.get(index)
         if g is None:
-            raise Busy(f"камера {index} не открыта; открыты {sorted(self.grabbers)}")
+            raise Busy(f"camera {index} is not open; open: {sorted(self.grabbers)}")
         data = g.jpeg(width)
         if data is None:
-            raise Busy(g.error or f"камера {index}: кадров еще нет")
+            raise Busy(g.error or f"camera {index}: no frames yet")
         return data
 
 
@@ -298,7 +298,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "robotd/1"
     app: Robotd
 
-    def log_message(self, fmt, *args):  # без строки на каждый запрос
+    def log_message(self, fmt, *args):  # no log line per request
         pass
 
     def _send(self, code: int, body, ctype="application/json; charset=utf-8"):
@@ -339,7 +339,7 @@ class Handler(BaseHTTPRequestHandler):
                 idx = int(tail) if tail else None
                 self._send(200, app.camera_jpeg(idx, int(q["w"]) if "w" in q else 640), "image/jpeg")
             else:
-                self._send(404, {"error": "нет такого пути"})
+                self._send(404, {"error": "no such path"})
 
         self._handle(run)
 
@@ -360,7 +360,7 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=shutdown, args=(bool(body.get("release")),), daemon=True).start()
             return
         if path not in routes:
-            self._send(404, {"error": "нет такого пути"})
+            self._send(404, {"error": "no such path"})
             return
         self._handle(lambda: self._send(200, routes[path]()))
 
@@ -372,7 +372,7 @@ APP: Robotd | None = None
 def shutdown(release: bool = False) -> None:
     try:
         if APP:
-            APP.log("Выход: " + ("отключаю момент" if release else "момент не трогаю"))
+            APP.log("Exit: " + ("disabling torque" if release else "torque untouched"))
             APP.close(release)
     finally:
         if SERVER:
@@ -382,18 +382,18 @@ def shutdown(release: bool = False) -> None:
 def main() -> int:
     global SERVER, APP
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--sim", action="store_true", help="виртуальная рука вместо порта")
-    ap.add_argument("--port", help="порт робота; по умолчанию автопоиск")
-    ap.add_argument("--cameras", help="индексы камер через запятую; по умолчанию все внешние, '' = без камер")
+    ap.add_argument("--sim", action="store_true", help="virtual arm instead of a serial port")
+    ap.add_argument("--port", help="robot serial port; auto-detected by default")
+    ap.add_argument("--cameras", help="comma-separated camera indices; default: all external, '' = no cameras")
     ap.add_argument("--http-port", type=int, default=PORT)
-    ap.add_argument("--z-min", type=float, default=-30.0, help="мм: ниже по z декартовы цели не принимаются")
+    ap.add_argument("--z-min", type=float, default=-30.0, help="mm: Cartesian goals below this z are rejected")
     args = ap.parse_args()
 
     port = None
     if not args.sim:
         ports = [args.port] if args.port else find_ports()
         if not ports:
-            print("Робот не найден: нет /dev/tty.usbmodem*. Подключите USB и питание или запустите с --sim.")
+            print("Robot not found: no /dev/tty.usbmodem*. Connect USB and power, or run with --sim.")
             return 1
         port = ports[0]
     if args.cameras is None:
@@ -404,7 +404,7 @@ def main() -> int:
     try:
         SERVER = ThreadingHTTPServer((HOST, args.http_port), Handler)
     except OSError as e:
-        print(f"Порт {HOST}:{args.http_port} занят: robotd уже запущен? ({e})")
+        print(f"Port {HOST}:{args.http_port} is busy: is robotd already running? ({e})")
         return 1
     SERVER.daemon_threads = True
     APP = Robotd(args.sim, port, cams, args.z_min)
